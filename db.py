@@ -38,7 +38,14 @@ def init():
             name TEXT,
             notify INTEGER NOT NULL DEFAULT 1
         );
+        CREATE TABLE IF NOT EXISTS meta(
+            key TEXT PRIMARY KEY,
+            value TEXT
+        );
         """)
+        cols = {r["name"] for r in c.execute("PRAGMA table_info(users)")}
+        if "morning" not in cols:
+            c.execute("ALTER TABLE users ADD COLUMN morning INTEGER NOT NULL DEFAULT 1")
 
 
 def now() -> str:
@@ -126,3 +133,27 @@ def toggle_notify(uid: int) -> bool:
     with connect() as c:
         c.execute("UPDATE users SET notify = 1 - notify WHERE id=?", (uid,))
         return bool(c.execute("SELECT notify FROM users WHERE id=?", (uid,)).fetchone()["notify"])
+
+
+def morning_on(uid: int) -> bool:
+    with connect() as c:
+        r = c.execute("SELECT morning FROM users WHERE id=?", (uid,)).fetchone()
+        return bool(r["morning"]) if r else True
+
+
+def toggle_morning(uid: int) -> bool:
+    with connect() as c:
+        c.execute("UPDATE users SET morning = 1 - morning WHERE id=?", (uid,))
+        return bool(c.execute("SELECT morning FROM users WHERE id=?", (uid,)).fetchone()["morning"])
+
+
+def meta_get(key: str):
+    with connect() as c:
+        r = c.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+        return r["value"] if r else None
+
+
+def meta_set(key: str, value: str):
+    with connect() as c:
+        c.execute("INSERT INTO meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                  (key, value))

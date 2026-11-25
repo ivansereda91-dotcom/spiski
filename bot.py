@@ -4,6 +4,8 @@ import html
 import logging
 import os
 import re
+from datetime import datetime, time as dtime, timedelta
+from zoneinfo import ZoneInfo
 
 from aiogram import BaseMiddleware, Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
@@ -23,6 +25,8 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 
 TOKEN = os.environ["BOT_TOKEN"]
 ALLOWED = {int(x) for x in os.getenv("ALLOWED_IDS", "").replace(" ", "").split(",") if x}
+TZ = ZoneInfo(os.getenv("TZ_NAME", "Europe/Paris"))
+MORNING_AT = dtime(*map(int, os.getenv("MORNING_AT", "08:00").split(":")))
 MAX_SHOWN = 80  # у Telegram ограничение на число кнопок в сообщении
 
 TITLE = {"buy": "🛒 Покупки", "todo": "✅ Дела"}
@@ -162,7 +166,8 @@ async def start(msg: Message, state: FSMContext):
         "• <b>➕ Купить</b> / <b>➕ Дело</b> — добавить, можно сразу несколько.\n"
         "• <b>🛒 Покупки</b> / <b>✅ Дела</b> — открыть список и отмечать галочкой.\n"
         "• Или просто напиши текст — я спрошу, в какой список.\n\n"
-        "Когда один из вас что-то добавляет, второму приходит уведомление. Выключить: /notify",
+        "Когда один из вас что-то добавляет, второму приходит уведомление. Выключить: /notify\n"
+        f"Каждое утро в {MORNING_AT:%H:%M} пришлю список дел. Выключить: /morning",
         reply_markup=MENU)
 
 
@@ -171,6 +176,13 @@ async def notify_cmd(msg: Message):
     on = db.toggle_notify(msg.chat.id)
     await msg.answer("🔔 Уведомления включены." if on else "🔕 Уведомления выключены. Включить снова: /notify",
                      reply_markup=MENU)
+
+
+@router.message(Command("morning"))
+async def morning_cmd(msg: Message):
+    on = db.toggle_morning(msg.chat.id)
+    await msg.answer(f"☀️ Утренний список дел включён — пришлю в {MORNING_AT:%H:%M}." if on
+                     else "🌙 Утренний список дел выключен. Включить снова: /morning", reply_markup=MENU)
 
 
 @router.message(Command("id"))
@@ -280,6 +292,39 @@ async def cb_add(cb: CallbackQuery, state: FSMContext):
     await cb.message.answer(ASK[lst], reply_markup=MENU)
 
 
+# ---------- утренняя рассылка дел ----------
+
+async def send_morning(bot: Bot):
+    left, _ = db.counts("todo")
+    if left == 0:
+        logging.info("Утро: дел нет, ничего не шлю")
+        return
+    text = "☀️ <b>Доброе утро!</b> Вот дела на сегодня.\n\n" + list_text("todo", "n")
+    for uid in ALLOWED:
+        if not db.morning_on(uid):
+            continue
+        try:
+            await bot.send_message(uid, text, reply_markup=list_kb("todo", "n"))
+        except Exception as ex:  # noqa: BLE001
+            logging.info("Не отправил утренний список %s: %s", uid, ex)
+
+
+async def morning_loop(bot: Bot):
+    """Раз в день в MORNING_AT по Ницце. Дату отправки храним в базе, чтобы после перезапуска не слать дважды."""
+    while True:
+        now = datetime.now(TZ)
+        today = now.date().isoformat()
+        if now.time() >= MORNING_AT and db.meta_get("morning_sent") != today:
+            # если бот лежал в 8:00 и поднялся позже — пришлём, но не позже полудня
+            if now.time() < dtime(12, 0):
+                await send_morning(bot)
+            db.meta_set("morning_sent", today)
+        target = datetime.combine(now.date(), MORNING_AT, TZ)
+        if now >= target:
+            target = datetime.combine(now.date() + timedelta(days=1), MORNING_AT, TZ)
+        await asyncio.sleep(min(max((target - datetime.now(TZ)).total_seconds(), 1), 600))
+
+
 async def main():
     db.init()
     bot = Bot(TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
@@ -289,7 +334,9 @@ async def main():
     dp.include_router(router)
     await bot.set_my_commands([BotCommand(command="start", description="Меню и подсказка"),
                                BotCommand(command="notify", description="Вкл/выкл уведомления"),
+                               BotCommand(command="morning", description="Вкл/выкл утренний список дел"),
                                BotCommand(command="id", description="Мой ID")])
+    asyncio.create_task(morning_loop(bot))
     logging.info("Списки запущены, доступ: %s", sorted(ALLOWED))
     await dp.start_polling(bot)
 
